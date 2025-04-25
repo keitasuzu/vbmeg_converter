@@ -1,10 +1,13 @@
-function DATA = fieldtrip_to_vbmeg(fieldtrip_file, vbmeg_file)
+function DATA = fieldtrip_to_vbmeg(fieldtrip_file, vbmeg_file, transmat)
 % Convert FieldTrip file into VBMEG file
 % [Usage]
 %    DATA = fieldtrip_to_vbmeg(fieldtrip_file, vbmeg_file)
 % [INPUT]
 %    fieldtrip_file  (from) FieldTrip file(.mat)
 %    vbmeg_file      (to)   VBMEG file(.meg.mat or .eeg.mat)
+%    transmat               This matrix is required to transform input coordinate to VBMEG coordinate system (SPM_Right_m)
+%                               Neuromag: transform matrix from MEG head coordinate to MRI RAS coordinate
+%
 % [OUTPUT]
 %    EEG             EEGLAB data structure
 % [NOTE]
@@ -12,6 +15,11 @@ function DATA = fieldtrip_to_vbmeg(fieldtrip_file, vbmeg_file)
 
 [~,tmp,~] = fileparts(vbmeg_file);
 [~,~,type] = fileparts(tmp); % 'meg' or 'eeg'
+
+flag_transe = false;
+if exist('transmat','var') && ~isempty(transmat)
+    flag_transe = true;
+end
 
 % Load FieldTrip data
 header = ft_read_header(fieldtrip_file);
@@ -49,30 +57,45 @@ switch type
         DATA.refmg    = data(ix_ref,:,:);
         DATA.bexp_ext = data(ix_ext,:,:);
 
-        % Coordinate transformation
-        header.grad.coordsys;
+        % pick and Qpick in original coordinate system
+        pick  = header.grad.coilpos;
+        Qpick = header.grad.coilori;
 
-        % Unit coefficient for correcting to [m]
-        switch header.grad.unit
-            case 'mm'
-                coef = 1/1000;
-            case 'cm'
-                coef = 1/100;
-            case 'm'
-                coef = 1;
+        % Convert unit to [m]
+        coef = inner_get_unitcoef(header.grad.unit);
+        pick = pick .* coef;
+
+        % Coordinate transformation to SPM_Right_m
+        if flag_transe
+            switch upper(header.grad.coordsys)
+                case 'NEUROMAG'
+                    % Transform original coordinate to MRI RAS coordinate system
+                    pick  = trans_coord(pick, transmat);
+                    Qpick = trans_coord(Qpick, transmat, 1);% Only rotate and normalize
+                    coord_system = 'SPM_Right_m';
+                otherwise
+                    warning(['Currently ' upper(header.grad.coordsys) ' coordinate cannot be transformed to VBMEG coordinate'])
+                    flag_transe = false;
+            end
         end
-        DATA.pick  = header.grad.coilpos .* coef;
-        DATA.Qpick = header.grad.coilori;
-        DATA.CoordType = 'SPM_Right_m';
+
+        if ~flag_transe
+            warning('Original coordinate system is kept (but unit is [m])')
+            coord_system = [upper(header.grad.coordsys) '_m']; % Keep original coord [m]
+        end
+
+        DATA.pick  = pick ;
+        DATA.Qpick = Qpick;
+        DATA.CoordType = coord_system;
         DATA.Measurement = 'MEG';
 
         % Which device is used?
-        dev = header.grad.type;
-        if contains(upper(dev), 'NEUROMAG')
+        dev_type = header.grad.type;
+        if contains(upper(dev_type), 'NEUROMAG')
             device = 'NEUROMAG';
             is_opm = false;
         else
-            error(['Currently ' dev ' is not supported yet'])
+            error(['Currently ' dev_type ' is not supported yet'])
         end
 
         % MEGinfo
@@ -100,7 +123,7 @@ switch type
         ChannelInfo.Active = MEGinfo.ActiveChannel;
         temp = zeros(size(data,1),1);
         if is_opm
-            error('Fix here')
+            error('Append here')
         else
             temp(ix_megmag)    = 1;
             temp(ix_meggrad)   = 2;
@@ -161,3 +184,16 @@ switch type
         error('Output vbmeg file must be ''meg.mat'' or ''eeg.mat''')
 end
 
+end
+
+function coef = inner_get_unitcoef(unit)
+% Unit coefficient for correcting to [m]
+switch unit
+    case 'mm'
+        coef = 1/1000;
+    case 'cm'
+        coef = 1/100;
+    case 'm'
+        coef = 1;
+end
+end
