@@ -9,12 +9,12 @@ function DATA = fieldtrip_to_vbmeg(fieldtrip_file, vbmeg_file, transmat)
 %                               Neuromag: transform matrix from MEG head coordinate to MRI RAS coordinate
 %
 % [OUTPUT]
-%    EEG             EEGLAB data structure
+%    DATA             VBMEG data structure
 % [NOTE]
 %
 
 [~,tmp,~] = fileparts(vbmeg_file);
-[~,~,type] = fileparts(tmp); % 'meg' or 'eeg'
+[~,~,output_type] = fileparts(tmp); % 'meg' or 'eeg'
 
 flag_transe = false;
 if exist('transmat','var') && ~isempty(transmat)
@@ -50,7 +50,7 @@ ix_eog       = contains(header.chantype, 'eog'); % {'eog','veog','heog'}
 ix_etc       = strcmp(header.chantype, 'etc') | strcmp(header.chantype, 'misc');
 ix_ext       = ix_trigger | ix_ecg | ix_eog | ix_etc;
 
-switch type
+switch output_type
     case '.meg'
         % Extract MEG, REFERENCE and others (EEG is ignored)
         DATA.bexp     = data(ix_meg,:,:);
@@ -178,7 +178,159 @@ switch type
         save(vbmeg_file, '-struct', 'DATA');
 
     case '.eeg'
-        error('Currently eeg.mat is not supported')
+        % Extract EEG and others (MEGs are ignored)
+        eeg_data = data(ix_eeg,:,:);
+        ext_data = data(ix_ext,:,:);
+        DATA.eeg_data = cat(1, eeg_data, ext_data);
+        Nchannel     = size(eeg_data, 1);
+        Nchannel_ext = size(ext_data, 1);
+
+        % Set measurement
+        DATA.Measurement = 'EEG';
+
+        % Coord(pos) in original coordinate system
+        Coord = header.elec.chanpos;
+
+        % Convert unit to [m]
+        coef  = inner_get_unitcoef(header.elec.unit);
+        Coord = Coord .* coef;
+
+        % Check 'coordsys' info in elec
+        warning('Now checking coordinate system of elec object...')
+        if ~isfield(header.elec, 'coordsys') || isempty(header.elec.coordsys)
+            warning('The coordinate system of elec object is not specified');
+            % If elec has no 'coordsys', then refer to grad
+            use_grad_coordsys = false;
+            warning('Reffering to grad object...')
+            if isfield(header, 'grad') && ~isempty(header.grad)
+                if isfield(header.grad, 'coordsys') && ~isempty(header.grad.coordsys)
+                    use_grad_coordsys = true;
+                    warning('Use the coordinate system of grad object')
+                else
+                    warning('No coordinate system in grad object')
+                end
+            else
+                warning('No grad object in the header')
+            end
+            if use_grad_coordsys
+                % Use same coordinate system as MEG
+                elec_coordsys = header.grad.coordsys;
+                warning(['Specified coordinate system: ' elec_coordsys])
+            else
+                % No coordinate info in the header
+                flag_transe = false;
+                elec_coordsys = [];
+                warning('No coordinate transformation')
+            end
+        else
+            elec_coordsys = header.elec.coordsys;
+            warning(['Specified coordinate system: ' elec_coordsys])
+       end
+
+        % Coordinate transformation to SPM_Right_m
+        if flag_transe
+            switch upper(elec_coordsys)
+                case 'NEUROMAG'
+                    % Transform original coordinate to MRI RAS coordinate system
+                    Coord  = trans_coord(Coord, transmat);
+                    coord_system = 'SPM_Right_m';
+                otherwise
+                    warning(['Currently ' upper(header.grad.coordsys) ' coordinate cannot be transformed to VBMEG coordinate'])
+                    flag_transe = false;
+            end
+        end
+
+        if ~flag_transe
+            warning('Original coordinate system is kept (but unit is [m])')
+            coord_system = [upper(header.grad.coordsys) '_m']; % Keep original coord [m]
+        end
+
+        % Which device is used?
+        if isfield(header.elec, 'type') && ~isempty(header.elec.type)
+            dev_type = header.elec.type;
+        else
+            dev_type = header.grad.type;
+        end
+
+        if contains(upper(dev_type), 'NEUROMAG')
+            % device = 'NEUROMAG';
+            device = 'BRAINAMP'; % Use data format for BRAINAMP
+            warning(['Device is registered as ' device ' for convenience...'])
+        else
+            error(['Currently ' dev_type ' is not supported yet'])
+        end
+
+        % Init EEGinfo
+        EEGinfo = [];
+        EEGinfo.Measurement = 'EEG';
+
+        % Set Coord and CoordType
+        EEGinfo.Coord  = Coord;
+        EEGinfo.CoordType = coord_system;
+
+        % EEGinfo
+        EEGinfo.Nchannel = Nchannel; % Num of eeg channels
+        EEGinfo.Nsample  = size(eeg_data,2);
+        EEGinfo.Nrepeat  = size(eeg_data,3);
+        EEGinfo.Pretrigger = 0; % header.nSamplesPre is ignored
+        EEGinfo.SampleFrequency = header.Fs;
+        EEGinfo.ChannelID   = [1:EEGinfo.Nchannel]';
+        EEGinfo.ChannelName = header.elec.label;
+        EEGinfo.MRI_ID = [];
+        EEGinfo.Device = device;
+        EEGinfo.ActiveChannel = ones(EEGinfo.Nchannel,1); % All active
+        EEGinfo.ActiveTrial   = ones(EEGinfo.Nrepeat,1); % All active
+        EEGinfo.cond_id  = ones(1,EEGinfo.Nrepeat); % Modify after imporing data using orig.event
+        EEGinfo.DataType = repmat({'float32'},Nchannel+Nchannel_ext,1); % Set float32 to all(eeg and extra)
+
+        % Make ChannelInfo
+        ChannelInfo = [];
+        ChannelInfo.Name   = EEGinfo.ChannelName;
+        ChannelInfo.ID     = EEGinfo.ChannelID;
+        ChannelInfo.Active = EEGinfo.ActiveChannel;
+        ChannelInfo.Type   = ones(EEGinfo.Nchannel,1); % All 1 (electrode)
+        ChannelInfo.PhysicalUnit = header.elec.chanunit;
+ 
+        % Make ExtraChannelInfo
+        ExtraChannelInfo.Channel_name   = header.label(ix_ext);
+        ExtraChannelInfo.Channel_id     = [EEGinfo.ChannelID(end)+1:EEGinfo.ChannelID(end)+Nchannel_ext]';
+        ExtraChannelInfo.Channel_active = ones(Nchannel_ext,1); % All active
+        temp = zeros(size(data,1),1);
+        temp(ix_trigger) = -1;
+        temp(ix_ecg) = -3;
+        temp(ix_eog) = -5;
+        temp(ix_etc) = -4;
+        ExtraChannelInfo.Channel_type = temp(ix_ext);
+        chanunit = header.chanunit(ix_ext);
+        ExtraChannelInfo.PhysicalUnit = chanunit;
+        EEGinfo.ExtraChannelInfo = ExtraChannelInfo;
+
+        % Make Trial struct
+        if is_epoched
+            Trial = [];
+            for tt=1:EEGinfo.Nrepeat
+                Trial(tt).sample = [event.sample(tt):event.sample(tt)+EEGinfo.Nsample];
+                Trial(tt).number = tt;
+                Trial(tt).Active = 1; % All active
+            end
+        else
+            Trial.sample = [1:EEGinfo.Nsample];
+            Trial.number = 1;
+            Trial.Active = 1;
+        end
+        EEGinfo.Trial = Trial;
+
+        DATA.EEGinfo = EEGinfo;
+
+        % Keep original header and event
+        orig = [];
+        orig.format = 'fieldtrip';
+        orig.event  = event;
+        orig.header = header;
+        DATA.orig = orig;
+
+        % Save in VBMEG format
+        save(vbmeg_file, '-struct', 'DATA');
 
     otherwise
         error('Output vbmeg file must be ''meg.mat'' or ''eeg.mat''')
