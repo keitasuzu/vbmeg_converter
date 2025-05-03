@@ -242,7 +242,14 @@ switch output_type
 
         if ~flag_transe
             warning('Original coordinate system is kept (but unit is [m])')
-            coord_system = [upper(header.grad.coordsys) '_m']; % Keep original coord [m]
+            if isfield(header.elec, 'coordsys') && ~isempty(header.elec.coordsys)
+                coord_system = [upper(header.elec.coordsys) '_m']; % Keep original coord [m]
+            elseif isfield(header, 'grad') && isfield(header.grad, 'coordsys') && ~isempty(header.grad.coordsys)
+                coord_system = [upper(header.grad.coordsys) '_m']; % Keep original coord [m]
+            else
+                warning('Original coordinate system empty...')
+                coord_system = '';
+            end
         end
 
         % Which device is used?
@@ -252,12 +259,15 @@ switch output_type
             dev_type = header.grad.type;
         end
 
+        % Need to modify vb_load_meg_data.m
         if contains(upper(dev_type), 'NEUROMAG')
             % device = 'NEUROMAG';
             device = 'BRAINAMP'; % Use data format for BRAINAMP
             warning(['Device is registered as ' device ' for convenience...'])
         else
-            error(['Currently ' dev_type ' is not supported yet'])
+            device = 'BRAINAMP'; % Use data format for BRAINAMP
+            warning(['Currently ' dev_type ' is not supported yet'])
+            warning(['Device is registered as ' device ' for convenience...'])
         end
 
         % Init EEGinfo
